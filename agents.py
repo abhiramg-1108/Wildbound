@@ -117,26 +117,32 @@ class CreatureAgent(Agent):
             berries = self.find_nearby_berries()
 
 
-            if berries:
+            # Try berries from closest to farthest and
+            # head for the first one A* can actually reach
+            berries.sort(
+                key=lambda b:
+                abs(b.pos[0] - self.pos[0])
+                +
+                abs(b.pos[1] - self.pos[1])
+            )
 
-                nearest_berry = self.find_nearest(
-                    berries
-                )
 
+            for berry in berries:
 
-                if nearest_berry.pos == self.pos:
+                if berry.pos == self.pos:
 
                     self.eat(
-                        nearest_berry
+                        berry
                     )
 
-                else:
+                    return
 
-                    self.move_towards(
-                        nearest_berry.pos
-                    )
 
-                return
+                if self.move_towards(
+                    berry.pos
+                ):
+
+                    return
 
 
         # -----------------------------------------------
@@ -176,7 +182,7 @@ class CreatureAgent(Agent):
         nearby_cells = self.model.grid.get_neighborhood(
             self.pos,
             moore=True,
-            include_center=False,
+            include_center=True,
             radius=DETECTION_RADIUS
         )
 
@@ -238,47 +244,44 @@ class CreatureAgent(Agent):
 
     def move_towards(self, target):
 
-        possible_steps = self.model.grid.get_neighborhood(
+        # A* finds the cheapest route around rocks
+        # and tall grass. We take only its first step
+        # and re-plan next turn (berries can vanish).
+        path = self.model.find_path(
             self.pos,
-            moore=True,
-            include_center=False
+            target,
+            moore=True
         )
 
 
-        if not possible_steps:
+        if path is None or len(path) < 2:
 
-            return
+            return False
 
 
-        best_step = min(
-            possible_steps,
-            key=lambda pos:
-            abs(
-                pos[0]
-                -
-                target[0]
-            )
-            +
-            abs(
-                pos[1]
-                -
-                target[1]
-            )
+        next_pos = path[1]
+
+        cost = self.model.move_cost(
+            next_pos
         )
 
 
         self.model.grid.move_agent(
             self,
-            best_step
+            next_pos
         )
 
 
-        self.energy -= 2
+        # Tall grass drains more energy
+        self.energy -= 2 * cost
 
 
         if self.energy < 0:
 
             self.energy = 0
+
+
+        return True
 
 
     # ===================================================
@@ -287,11 +290,15 @@ class CreatureAgent(Agent):
 
     def wander(self):
 
-        possible_steps = self.model.grid.get_neighborhood(
-            self.pos,
-            moore=True,
-            include_center=False
-        )
+        possible_steps = [
+            pos for pos in
+            self.model.grid.get_neighborhood(
+                self.pos,
+                moore=True,
+                include_center=False
+            )
+            if self.model.move_cost(pos) is not None
+        ]
 
 
         if possible_steps:
@@ -307,7 +314,9 @@ class CreatureAgent(Agent):
             )
 
 
-            self.energy -= 1
+            self.energy -= self.model.move_cost(
+                new_position
+            )
 
 
             if self.energy < 0:
@@ -476,34 +485,22 @@ class PlayerAgent(Agent):
 
         if direction == "up":
 
-            new_position = (
-                x,
-                y + 1
-            )
+            new_position = (x, y + 1)
 
 
         elif direction == "down":
 
-            new_position = (
-                x,
-                y - 1
-            )
+            new_position = (x, y - 1)
 
 
         elif direction == "left":
 
-            new_position = (
-                x - 1,
-                y
-            )
+            new_position = (x - 1, y)
 
 
         elif direction == "right":
 
-            new_position = (
-                x + 1,
-                y
-            )
+            new_position = (x + 1, y)
 
 
         else:
@@ -512,14 +509,14 @@ class PlayerAgent(Agent):
                 "Invalid direction!"
             )
 
-            return
+            return False
 
 
         # -----------------------------------------------
         # MAP BOUNDARY CHECK
         # -----------------------------------------------
 
-        if (
+        inside_map = (
             0 <= new_position[0]
             <
             self.model.grid.width
@@ -529,25 +526,44 @@ class PlayerAgent(Agent):
             0 <= new_position[1]
             <
             self.model.grid.height
-        ):
+        )
+
+
+        moved = False
+
+
+        if not inside_map:
+
+            print(
+                "🚧 Player cannot move "
+                "outside the map!"
+            )
+
+
+        # -----------------------------------------------
+        # ROCK CHECK
+        # -----------------------------------------------
+
+        elif self.model.move_cost(new_position) is None:
+
+            print(
+                "🪨 A rock blocks the way!"
+            )
+
+
+        else:
 
             self.model.grid.move_agent(
                 self,
                 new_position
             )
 
+            moved = True
+
 
             print(
                 f"👤 Player moved to "
                 f"{self.pos}"
-            )
-
-
-        else:
-
-            print(
-                "🚧 Player cannot move "
-                "outside the map!"
             )
 
 
@@ -565,6 +581,65 @@ class PlayerAgent(Agent):
                 self.start_encounter(
                     creature
                 )
+
+
+        return moved
+
+
+    # ===================================================
+    # A* TRAVEL (OPTIONAL - PLAYER STAYS IN CONTROL)
+    # ===================================================
+
+    def plan_path(self, goal):
+        """Ask A* for a route. Does NOT move the player."""
+
+        return self.model.find_path(
+            self.pos,
+            goal,
+            moore=False
+        )
+
+
+    def follow_path(self, path):
+        """
+        Walk a route one tile at a time.
+        The wild world acts after every tile, and the
+        walk stops as soon as an encounter starts.
+        """
+
+        for next_pos in path[1:]:
+
+            x, y = self.pos
+
+            dx = next_pos[0] - x
+            dy = next_pos[1] - y
+
+            direction = {
+                (0, 1): "up",
+                (0, -1): "down",
+                (-1, 0): "left",
+                (1, 0): "right"
+            }[(dx, dy)]
+
+
+            if not self.move(direction):
+
+                print("⛔ Route blocked, stopping.")
+
+                return
+
+
+            self.model.step()
+
+
+            if self.encounter:
+
+                print("⚠️ Travel interrupted!")
+
+                return
+
+
+        print(f"📍 Arrived at {self.pos}")
 
 
     # ===================================================

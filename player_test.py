@@ -1,4 +1,5 @@
 from model import WildboundModel
+from pathfinding import path_cost
 
 
 # =======================================================
@@ -32,6 +33,9 @@ print(
     f"{player.starter.hp}/"
     f"{player.starter.max_hp}"
 )
+
+
+model.print_map()
 
 
 # =======================================================
@@ -264,6 +268,14 @@ for step in range(50):
     )
 
     print(
+        "M = Show map"
+    )
+
+    print(
+        "T = Travel to a tile (A* plans the route)"
+    )
+
+    print(
         "Q = Quit"
     )
 
@@ -280,6 +292,86 @@ for step in range(50):
         )
 
         break
+
+
+    # ---------------------------------------------------
+    # SHOW MAP
+    # ---------------------------------------------------
+
+    if move == "m":
+
+        model.print_map()
+
+        continue
+
+
+    # ---------------------------------------------------
+    # TRAVEL: A* suggests, the player decides
+    # ---------------------------------------------------
+
+    if move == "t":
+
+        try:
+
+            goal = (
+                int(input("Target x: ")),
+                int(input("Target y: "))
+            )
+
+        except ValueError:
+
+            print(
+                "❌ Please enter numbers."
+            )
+
+            continue
+
+
+        path = player.plan_path(
+            goal
+        )
+
+
+        if path is None:
+
+            print(
+                "❌ No route to that tile "
+                "(rock, off the map, or walled in)."
+            )
+
+            continue
+
+
+        cost = path_cost(
+            path,
+            model.move_cost
+        )
+
+
+        model.print_map(path)
+
+
+        print(
+            f"\nRoute: {len(path) - 1} steps, "
+            f"cost {cost}"
+        )
+
+
+        answer = input(
+            "Follow this route? (y/n): "
+        ).lower()
+
+
+        if answer == "y":
+
+            # follow_path already lets the world
+            # act after every tile
+            player.follow_path(
+                path
+            )
+
+
+        continue
 
 
     if move == "w":

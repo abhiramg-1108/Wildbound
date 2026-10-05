@@ -20,6 +20,15 @@ NUM_BERRIES = 15
 
 
 # =======================================================
+# TERRAIN (used by A* pathfinding)
+# =======================================================
+
+NUM_ROCKS = 45          # impassable tiles
+NUM_GRASS = 60          # tall grass tiles
+GRASS_COST = 3          # normal tile = 1, tall grass = 3
+
+
+# =======================================================
 # CREATURE PROPERTIES
 # =======================================================
 
