@@ -1,12 +1,10 @@
-import random
-
 from mesa import Model
 from mesa.space import MultiGrid
 
 from agents import (
     CreatureAgent,
     BerryAgent,
-    PlayerAgent
+    PlayerAgent,
 )
 
 from config import (
@@ -16,10 +14,16 @@ from config import (
     NUM_BERRIES,
     NUM_ROCKS,
     NUM_GRASS,
-    GRASS_COST
+    GRASS_COST,
+    BERRY_RESPAWN_EVERY,
+    MIN_START_DISTANCE,
 )
 
 from pathfinding import astar
+
+
+# Sparkit is your starter, so wild creatures are the other four
+WILD_SPECIES = ["Flameling", "Aquaff", "Leaflet", "Breezle"]
 
 
 # =======================================================
@@ -28,110 +32,55 @@ from pathfinding import astar
 
 class WildboundModel(Model):
 
-    def __init__(self):
+    def __init__(self, seed=None):
 
-        super().__init__()
+        super().__init__(seed=seed)
 
-
-        # -----------------------------------------------
-        # CREATE GAME WORLD
-        # -----------------------------------------------
-
-        self.grid = MultiGrid(
-            WIDTH,
-            HEIGHT,
-            torus=False
-        )
-
+        self.grid = MultiGrid(WIDTH, HEIGHT, torus=False)
 
         self.step_count = 0
 
+        self.start_pos = (WIDTH // 2, HEIGHT // 2)
 
-        # -----------------------------------------------
-        # CREATE TERRAIN (rocks and tall grass)
-        # -----------------------------------------------
-
+        # ---- terrain (re-rolled if rocks wall off the map) ----
         self.terrain = {}
+        self.reachable = set()
 
-        self.generate_terrain()
+        for _ in range(50):
 
+            self.generate_terrain()
+            self.reachable = self.compute_reachable()
 
-        # -----------------------------------------------
-        # CREATE WILD CREATURES
-        # -----------------------------------------------
+            free = WIDTH * HEIGHT - NUM_ROCKS
 
-        species = [
-            "Sparkit",
-            "Flameling",
-            "Aquaff",
-            "Leaflet",
-            "Breezle"
-        ]
+            if len(self.reachable) >= 0.9 * free:
+                break
 
-
-        for i in range(NUM_CREATURES):
+        # ---- wild creatures (all different species, spread out) ----
+        for species in self.random.sample(WILD_SPECIES, NUM_CREATURES):
 
             creature = CreatureAgent(
                 self,
-                species=random.choice(species)
+                species=species,
+                energy=self.random.randint(30, 80),
             )
-
 
             self.grid.place_agent(
                 creature,
-                self.random_free_cell()
+                self.random_free_cell(
+                    min_dist=MIN_START_DISTANCE,
+                    avoid=CreatureAgent,
+                ),
             )
 
+        # ---- berries ----
+        for _ in range(NUM_BERRIES):
+            self.spawn_berry()
 
-        # -----------------------------------------------
-        # CREATE BERRIES
-        # -----------------------------------------------
+        # ---- player ----
+        self.player = PlayerAgent(self)
 
-        for i in range(NUM_BERRIES):
-
-            berry = BerryAgent(self)
-
-
-            self.grid.place_agent(
-                berry,
-                self.random_free_cell()
-            )
-
-
-        # -----------------------------------------------
-        # CREATE PLAYER
-        # -----------------------------------------------
-
-        self.player = PlayerAgent(
-            self
-        )
-
-
-        self.grid.place_agent(
-            self.player,
-            (
-                WIDTH // 2,
-                HEIGHT // 2
-            )
-        )
-
-
-        # -----------------------------------------------
-        # STARTER MESSAGE
-        # -----------------------------------------------
-
-        print(
-            "\n⚡ Your starter Pokémon is "
-            f"{self.player.starter.species}!"
-        )
-
-
-        print(
-            f"❤️ HP: "
-            f"{self.player.starter.hp}/"
-            f"{self.player.starter.max_hp}"
-        )
-
+        self.grid.place_agent(self.player, self.start_pos)
 
     # ===================================================
     # TERRAIN
@@ -139,30 +88,47 @@ class WildboundModel(Model):
 
     def generate_terrain(self):
 
-        start = (WIDTH // 2, HEIGHT // 2)
+        cells = [
+            (x, y)
+            for x in range(WIDTH)
+            for y in range(HEIGHT)
+            if (x, y) != self.start_pos
+        ]
 
-        for terrain, amount in (
-            ("rock", NUM_ROCKS),
-            ("grass", NUM_GRASS)
-        ):
+        self.random.shuffle(cells)
 
-            placed = 0
+        self.terrain = {}
 
-            while placed < amount:
+        for pos in cells[:NUM_ROCKS]:
+            self.terrain[pos] = "rock"
 
-                pos = (
-                    self.random.randrange(WIDTH),
-                    self.random.randrange(HEIGHT)
-                )
+        for pos in cells[NUM_ROCKS:NUM_ROCKS + NUM_GRASS]:
+            self.terrain[pos] = "grass"
 
-                # Keep the player's start tile clear
-                if pos == start or pos in self.terrain:
-                    continue
+    def compute_reachable(self):
+        """Tiles the player can walk to from the start (flood fill)."""
 
-                self.terrain[pos] = terrain
+        seen = {self.start_pos}
+        todo = [self.start_pos]
 
-                placed += 1
+        while todo:
 
+            x, y = todo.pop()
+
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+
+                n = (x + dx, y + dy)
+
+                if (
+                    n not in seen
+                    and 0 <= n[0] < WIDTH
+                    and 0 <= n[1] < HEIGHT
+                    and self.move_cost(n) is not None
+                ):
+                    seen.add(n)
+                    todo.append(n)
+
+        return seen
 
     def move_cost(self, pos):
         """Cost of entering a tile. None = blocked."""
@@ -177,35 +143,75 @@ class WildboundModel(Model):
 
         return 1
 
-
-    def random_free_cell(self):
-
-        while True:
-
-            pos = (
-                self.random.randrange(WIDTH),
-                self.random.randrange(HEIGHT)
-            )
-
-            if self.move_cost(pos) is not None:
-                return pos
-
-
     def find_path(self, start, goal, moore=False):
         """A* route over this world's terrain."""
 
         return astar(
-            start,
-            goal,
-            WIDTH,
-            HEIGHT,
-            self.move_cost,
-            moore=moore
+            start, goal, WIDTH, HEIGHT, self.move_cost, moore=moore
         )
 
+    # ===================================================
+    # PLACING THINGS
+    # ===================================================
+
+    def cell_has(self, pos, agent_type):
+
+        return any(
+            isinstance(a, agent_type)
+            for a in self.grid.get_cell_list_contents([pos])
+        )
+
+    def random_free_cell(self, min_dist=0, avoid=None):
+        """A reachable tile (optionally far from the start, and
+        without an agent of type `avoid`)."""
+
+        sx, sy = self.start_pos
+
+        cells = [
+            pos for pos in self.reachable
+            if max(abs(pos[0] - sx), abs(pos[1] - sy)) >= min_dist
+            and (avoid is None or not self.cell_has(pos, avoid))
+        ]
+
+        return self.random.choice(sorted(cells))
+
+    def spawn_berry(self):
+
+        berry = BerryAgent(self)
+
+        self.grid.place_agent(
+            berry,
+            self.random_free_cell(avoid=BerryAgent),
+        )
 
     # ===================================================
-    # ASCII MAP (for the terminal version)
+    # QUERIES
+    # ===================================================
+
+    def wild_creatures(self):
+
+        return [
+            a for a in self.agents
+            if isinstance(a, CreatureAgent)
+            and not a.player_owned
+            and a.hp > 0
+            and a.pos is not None
+        ]
+
+    def berries(self):
+
+        return [
+            a for a in self.agents
+            if isinstance(a, BerryAgent) and a.pos is not None
+        ]
+
+    def is_won(self):
+        """The game is won when no wild creature is left."""
+
+        return len(self.wild_creatures()) == 0
+
+    # ===================================================
+    # ASCII MAP (terminal version)
     # ===================================================
 
     def print_map(self, path=None):
@@ -213,6 +219,9 @@ class WildboundModel(Model):
         path_tiles = set(path) if path else set()
 
         print()
+
+        wild = {c.pos for c in self.wild_creatures()}
+        berries = {b.pos for b in self.berries()}
 
         for y in range(HEIGHT - 1, -1, -1):
 
@@ -222,34 +231,18 @@ class WildboundModel(Model):
 
                 pos = (x, y)
 
-                contents = self.grid.get_cell_list_contents([pos])
-
-                if self.player in contents:
+                if pos == self.player.pos:
                     symbol = "@"
-
-                elif any(
-                    type(a).__name__ == "CreatureAgent"
-                    and not a.player_owned
-                    and a.hp > 0
-                    for a in contents
-                ):
+                elif pos in wild:
                     symbol = "C"
-
                 elif pos in path_tiles:
                     symbol = "*"
-
-                elif any(
-                    type(a).__name__ == "BerryAgent"
-                    for a in contents
-                ):
+                elif pos in berries:
                     symbol = "b"
-
                 elif self.terrain.get(pos) == "rock":
                     symbol = "#"
-
                 elif self.terrain.get(pos) == "grass":
                     symbol = '"'
-
                 else:
                     symbol = "."
 
@@ -264,42 +257,39 @@ class WildboundModel(Model):
             "\" tall grass  * route"
         )
 
-
     # ===================================================
-    # SIMULATION STEP
+    # ONE TURN OF THE WORLD
     # ===================================================
 
     def step(self):
 
-        print(
-            f"\n========== STEP "
-            f"{self.step_count + 1} =========="
-        )
+        print(f"\n========== TURN {self.step_count + 1} ==========")
 
+        # wild creatures and berries act in random order ...
+        self.agents.select(lambda a: a is not self.player).shuffle_do("step")
 
-        self.agents.shuffle_do(
-            "step"
-        )
-
+        # ... then the player checks who ended up next to them
+        self.player.step()
 
         self.step_count += 1
 
+        if (
+            self.step_count % BERRY_RESPAWN_EVERY == 0
+            and len(self.berries()) < NUM_BERRIES
+        ):
+            self.spawn_berry()
+
 
 # =======================================================
-# TEST MODEL DIRECTLY
+# QUICK CHECK:  python model.py
 # =======================================================
 
 if __name__ == "__main__":
 
     model = WildboundModel()
 
-
-    for i in range(30):
-
+    for _ in range(30):
         model.step()
 
-
-        print(
-            f"Active agents: "
-            f"{len(model.agents)}"
-        )
+    print(f"\nWild left: {len(model.wild_creatures())}, "
+          f"berries: {len(model.berries())}")

@@ -1,16 +1,24 @@
-import random
-
 from mesa import Agent
 
 from config import (
     MAX_HP,
+    WILD_HP,
     MAX_ENERGY,
-    DETECTION_RADIUS
+    PLAYER_DAMAGE,
+    WILD_DAMAGE,
+    HUNGER_PER_STEP,
+    HUNGRY_BELOW,
+    ENERGY_PER_BERRY,
+    DETECTION_RADIUS,
+    WANDER_CHANCE,
+    CALM_TURNS,
 )
+
+from pathfinding import path_cost
 
 
 # =======================================================
-# BERRY AGENT
+# BERRY
 # =======================================================
 
 class BerryAgent(Agent):
@@ -18,25 +26,19 @@ class BerryAgent(Agent):
     def __init__(self, model):
         super().__init__(model)
 
-
     def step(self):
-
         pass
-
 
     def remove(self):
 
         if self.pos is not None:
-
-            self.model.grid.remove_agent(
-                self
-            )
+            self.model.grid.remove_agent(self)
 
         super().remove()
 
 
 # =======================================================
-# CREATURE AGENT
+# CREATURE (wild or owned by the player)
 # =======================================================
 
 class CreatureAgent(Agent):
@@ -45,371 +47,215 @@ class CreatureAgent(Agent):
         self,
         model,
         species,
-        hp=MAX_HP,
+        max_hp=WILD_HP,
         energy=MAX_ENERGY,
-        player_owned=False
+        player_owned=False,
     ):
 
         super().__init__(model)
 
         self.species = species
-        self.hp = hp
+        self.max_hp = max_hp
+        self.hp = max_hp
         self.energy = energy
-
-        # Maximum HP
-        self.max_hp = MAX_HP
-
-        # Creature stats
-        self.attack = random.randint(
-            10,
-            20
-        )
-
-        self.speed = random.randint(
-            1,
-            2
-        )
-
-        # Personality still exists as an
-        # AI characteristic
-        self.personality = random.choice([
-            "aggressive",
-            "timid",
-            "neutral"
-        ])
-
-        # Battle cooldown
-        self.cooldown = 0
-
-        # Is this creature part of
-        # the player's team?
         self.player_owned = player_owned
 
-        # Experience
-        self.xp = 0
+        # After the player runs away, the creature ignores
+        # the player for this many turns (so "Run" really works)
+        self.calm = 0
 
+    # ---------------------------------------------------
+    # state
+    # ---------------------------------------------------
+
+    @property
+    def is_hungry(self):
+        return self.energy < HUNGRY_BELOW
 
     # ===================================================
-    # WILD CREATURE AI
+    # WILD CREATURE AI  (one decision per turn)
+    #
+    #   1. lose a little energy
+    #   2. standing on a berry and hungry enough -> eat it
+    #   3. hungry -> A* to the cheapest reachable berry
+    #   4. otherwise wander (only half of the turns)
     # ===================================================
 
     def step(self):
 
-        # Player-owned creatures do not
-        # wander independently.
-        if self.player_owned:
-
+        if self.player_owned or self.hp <= 0:
             return
 
+        player = getattr(self.model, "player", None)
 
-        # Defeated wild creatures do nothing
-        if self.hp <= 0:
-
+        # The world holds its breath during a fight
+        if player is not None and player.encounter is self:
             return
 
+        if self.calm > 0:
+            self.calm -= 1
 
-        # -----------------------------------------------
-        # FIND FOOD WHEN HUNGRY
-        # -----------------------------------------------
+        self.energy = max(0, self.energy - HUNGER_PER_STEP)
 
-        if self.energy < 50:
+        if self.try_eat():
+            return
 
-            berries = self.find_nearby_berries()
+        if self.is_hungry:
 
+            plan = self.plan_food_route()
 
-            # Try berries from closest to farthest and
-            # head for the first one A* can actually reach
-            berries.sort(
-                key=lambda b:
-                abs(b.pos[0] - self.pos[0])
-                +
-                abs(b.pos[1] - self.pos[1])
-            )
+            if plan is not None:
 
+                path, _berry = plan
+                next_pos = path[1]
 
-            for berry in berries:
-
-                if berry.pos == self.pos:
-
-                    self.eat(
-                        berry
-                    )
-
-                    return
-
-
-                if self.move_towards(
-                    berry.pos
-                ):
-
-                    return
-
-
-        # -----------------------------------------------
-        # CHECK FOR BERRY ON CURRENT CELL
-        # -----------------------------------------------
-
-        contents = self.model.grid.get_cell_list_contents(
-            [self.pos]
-        )
-
-
-        for obj in contents:
-
-            if isinstance(
-                obj,
-                BerryAgent
-            ):
-
-                self.eat(obj)
+                # never walk onto the player's tile; wait instead
+                if player is None or next_pos != player.pos:
+                    self.move_to(next_pos)
+                    self.try_eat()
 
                 return
 
+            # hungry but nothing reachable nearby: keep searching
+            self.wander()
+            self.try_eat()
+            return
 
-        # -----------------------------------------------
-        # OTHERWISE WANDER
-        # -----------------------------------------------
+        if self.model.random.random() < WANDER_CHANCE:
+            self.wander()
+            self.try_eat()
 
-        self.wander()
-
-
-    # ===================================================
-    # FIND NEARBY BERRIES
-    # ===================================================
+    # ---------------------------------------------------
+    # food
+    # ---------------------------------------------------
 
     def find_nearby_berries(self):
 
-        nearby_cells = self.model.grid.get_neighborhood(
+        cells = self.model.grid.get_neighborhood(
             self.pos,
             moore=True,
             include_center=True,
-            radius=DETECTION_RADIUS
+            radius=DETECTION_RADIUS,
         )
 
+        return [
+            obj
+            for cell in cells
+            for obj in self.model.grid.get_cell_list_contents([cell])
+            if isinstance(obj, BerryAgent)
+        ]
 
-        berries = []
+    def plan_food_route(self):
+        """
+        A* to every berry in range; pick the CHEAPEST route
+        (tall grass counts), not just the closest berry.
+        Returns (path, berry) or None.
 
+        The visualisation calls this too, so what you see
+        is exactly what the creature will do.
+        """
 
-        for cell in nearby_cells:
+        best = None
 
-            contents = self.model.grid.get_cell_list_contents(
-                [cell]
-            )
+        for berry in self.find_nearby_berries():
 
+            if berry.pos == self.pos:
+                continue
 
-            for obj in contents:
+            path = self.model.find_path(self.pos, berry.pos, moore=True)
 
-                if isinstance(
-                    obj,
-                    BerryAgent
-                ):
+            if path is None or len(path) < 2:
+                continue
 
-                    berries.append(obj)
+            cost = path_cost(path, self.model.move_cost)
 
+            if best is None or cost < best[0]:
+                best = (cost, path, berry)
 
-        return berries
-
-
-    # ===================================================
-    # FIND NEAREST OBJECT
-    # ===================================================
-
-    def find_nearest(self, objects):
-
-        if not objects:
-
+        if best is None:
             return None
 
+        return best[1], best[2]
 
-        return min(
-            objects,
-            key=lambda obj:
-            abs(
-                obj.pos[0]
-                -
-                self.pos[0]
-            )
-            +
-            abs(
-                obj.pos[1]
-                -
-                self.pos[1]
-            )
-        )
+    def try_eat(self):
+        """Eat a berry on this tile, unless it would be wasted."""
 
-
-    # ===================================================
-    # MOVE TOWARDS TARGET
-    # ===================================================
-
-    def move_towards(self, target):
-
-        # A* finds the cheapest route around rocks
-        # and tall grass. We take only its first step
-        # and re-plan next turn (berries can vanish).
-        path = self.model.find_path(
-            self.pos,
-            target,
-            moore=True
-        )
-
-
-        if path is None or len(path) < 2:
-
+        if self.energy > MAX_ENERGY - ENERGY_PER_BERRY:
             return False
 
+        for obj in self.model.grid.get_cell_list_contents([self.pos]):
 
-        next_pos = path[1]
+            if isinstance(obj, BerryAgent):
 
-        cost = self.model.move_cost(
-            next_pos
-        )
+                self.energy = min(MAX_ENERGY, self.energy + ENERGY_PER_BERRY)
 
+                obj.remove()
 
-        self.model.grid.move_agent(
-            self,
-            next_pos
-        )
+                print(f"{self.species} ate a berry.")
 
+                return True
 
-        # Tall grass drains more energy
-        self.energy -= 2 * cost
+        return False
 
+    # ---------------------------------------------------
+    # movement
+    # ---------------------------------------------------
 
-        if self.energy < 0:
+    def move_to(self, pos):
 
-            self.energy = 0
+        cost = self.model.move_cost(pos)
 
+        self.model.grid.move_agent(self, pos)
 
-        return True
-
-
-    # ===================================================
-    # WANDER
-    # ===================================================
+        # tall grass is tiring: pay the extra cost in energy
+        self.energy = max(0, self.energy - (cost - 1))
 
     def wander(self):
 
-        possible_steps = [
-            pos for pos in
-            self.model.grid.get_neighborhood(
-                self.pos,
-                moore=True,
-                include_center=False
+        player = getattr(self.model, "player", None)
+
+        steps = [
+            pos
+            for pos in self.model.grid.get_neighborhood(
+                self.pos, moore=True, include_center=False
             )
             if self.model.move_cost(pos) is not None
+            and (player is None or pos != player.pos)
         ]
 
+        if steps:
+            self.move_to(self.model.random.choice(steps))
 
-        if possible_steps:
-
-            new_position = random.choice(
-                possible_steps
-            )
-
-
-            self.model.grid.move_agent(
-                self,
-                new_position
-            )
-
-
-            self.energy -= self.model.move_cost(
-                new_position
-            )
-
-
-            if self.energy < 0:
-
-                self.energy = 0
-
-
-    # ===================================================
-    # EAT BERRY
-    # ===================================================
-
-    def eat(self, berry):
-
-        self.energy += 30
-
-
-        if self.energy > MAX_ENERGY:
-
-            self.energy = MAX_ENERGY
-
-
-        berry.remove()
-
-
-        print(
-            f"🍓 {self.species} ate a berry"
-        )
-
-
-    # ===================================================
-    # TAKE DAMAGE
-    # ===================================================
+    # ---------------------------------------------------
+    # health
+    # ---------------------------------------------------
 
     def take_damage(self, damage):
-
-        self.hp -= damage
-
-
-        if self.hp < 0:
-
-            self.hp = 0
-
-
-    # ===================================================
-    # GAIN XP
-    # ===================================================
-
-    def gain_xp(self, amount):
-
-        self.xp += amount
-
-
-        print(
-            f"⭐ {self.species} gained "
-            f"{amount} XP!"
-        )
-
-
-    # ===================================================
-    # HEAL
-    # ===================================================
+        self.hp = max(0, self.hp - damage)
 
     def heal(self):
-
         self.hp = self.max_hp
-
         self.energy = MAX_ENERGY
-
-
-        print(
-            f"💚 {self.species} was healed!"
-        )
-
-
-    # ===================================================
-    # REMOVE CREATURE
-    # ===================================================
 
     def remove(self):
 
         if self.pos is not None:
-
-            self.model.grid.remove_agent(
-                self
-            )
-
+            self.model.grid.remove_agent(self)
 
         super().remove()
 
 
 # =======================================================
-# PLAYER AGENT
+# PLAYER
 # =======================================================
+
+DIRECTIONS = {
+    "up": (0, 1),
+    "down": (0, -1),
+    "left": (-1, 0),
+    "right": (1, 0),
+}
+
 
 class PlayerAgent(Agent):
 
@@ -417,740 +263,344 @@ class PlayerAgent(Agent):
 
         super().__init__(model)
 
-
-        # Current encounter
-        self.encounter = None
-
-
-        # Captured creature names
-        self.captured_creatures = []
-
-
-        # -----------------------------------------------
-        # STARTER CREATURE
-        # -----------------------------------------------
+        self.encounter = None            # wild creature we are fighting
+        self.captured_creatures = []     # species names caught so far
+        self.defeated = 0                # wild creatures knocked out
 
         self.starter = CreatureAgent(
             model,
             species="Sparkit",
-            player_owned=True
+            max_hp=MAX_HP,
+            player_owned=True,
         )
 
-
-        # -----------------------------------------------
-        # PLAYER TEAM
-        # -----------------------------------------------
-
-        self.team = [
-            self.starter
-        ]
-
-
-        # -----------------------------------------------
-        # ACTIVE CREATURE
-        # -----------------------------------------------
-
+        self.team = [self.starter]
         self.active_creature = self.starter
 
-
-    # ===================================================
-    # PLAYER STEP
-    # ===================================================
+    # ---------------------------------------------------
+    # turn
+    # ---------------------------------------------------
 
     def step(self):
 
-        # Player is controlled externally.
-        # We only check for nearby encounters.
-
+        # The player is controlled from outside; each turn we
+        # only check whether a wild creature came close.
         if self.encounter is None:
 
             creature = self.check_for_encounter()
 
-
             if creature:
-
-                self.start_encounter(
-                    creature
-                )
-
+                self.start_encounter(creature)
 
     # ===================================================
-    # PLAYER MOVEMENT
+    # MOVEMENT
     # ===================================================
 
     def move(self, direction):
+        """Move one tile. Returns True if the player moved."""
 
-        x, y = self.pos
-
-
-        if direction == "up":
-
-            new_position = (x, y + 1)
-
-
-        elif direction == "down":
-
-            new_position = (x, y - 1)
-
-
-        elif direction == "left":
-
-            new_position = (x - 1, y)
-
-
-        elif direction == "right":
-
-            new_position = (x + 1, y)
-
-
-        else:
-
-            print(
-                "Invalid direction!"
-            )
-
+        if self.encounter is not None:
+            print("Finish the battle first!")
             return False
 
+        if direction not in DIRECTIONS:
+            print("Invalid direction!")
+            return False
 
-        # -----------------------------------------------
-        # MAP BOUNDARY CHECK
-        # -----------------------------------------------
+        dx, dy = DIRECTIONS[direction]
+        new_pos = (self.pos[0] + dx, self.pos[1] + dy)
 
-        inside_map = (
-            0 <= new_position[0]
-            <
-            self.model.grid.width
-
-            and
-
-            0 <= new_position[1]
-            <
-            self.model.grid.height
+        inside = (
+            0 <= new_pos[0] < self.model.grid.width
+            and 0 <= new_pos[1] < self.model.grid.height
         )
 
+        if not inside:
+            print("You cannot leave the map.")
+            return False
 
-        moved = False
+        if self.model.move_cost(new_pos) is None:
+            print("A rock blocks the way.")
+            return False
 
+        self.model.grid.move_agent(self, new_pos)
 
-        if not inside_map:
+        creature = self.check_for_encounter()
 
-            print(
-                "🚧 Player cannot move "
-                "outside the map!"
-            )
+        if creature:
+            self.start_encounter(creature)
 
+        return True
 
-        # -----------------------------------------------
-        # ROCK CHECK
-        # -----------------------------------------------
+    def step_to(self, pos):
+        """Move onto a neighbouring tile (used when following a route)."""
 
-        elif self.model.move_cost(new_position) is None:
+        delta = (pos[0] - self.pos[0], pos[1] - self.pos[1])
 
-            print(
-                "🪨 A rock blocks the way!"
-            )
+        for name, d in DIRECTIONS.items():
+            if d == delta:
+                return self.move(name)
 
+        return False
 
-        else:
-
-            self.model.grid.move_agent(
-                self,
-                new_position
-            )
-
-            moved = True
-
-
-            print(
-                f"👤 Player moved to "
-                f"{self.pos}"
-            )
-
-
-        # -----------------------------------------------
-        # CHECK ENCOUNTER
-        # -----------------------------------------------
-
-        if self.encounter is None:
-
-            creature = self.check_for_encounter()
-
-
-            if creature:
-
-                self.start_encounter(
-                    creature
-                )
-
-
-        return moved
-
-
-    # ===================================================
-    # A* TRAVEL (OPTIONAL - PLAYER STAYS IN CONTROL)
-    # ===================================================
+    # ---------------------------------------------------
+    # A* travel (optional - the player stays in control)
+    # ---------------------------------------------------
 
     def plan_path(self, goal):
         """Ask A* for a route. Does NOT move the player."""
 
-        return self.model.find_path(
-            self.pos,
-            goal,
-            moore=False
-        )
-
+        return self.model.find_path(self.pos, goal, moore=False)
 
     def follow_path(self, path):
         """
-        Walk a route one tile at a time.
-        The wild world acts after every tile, and the
-        walk stops as soon as an encounter starts.
+        Walk a route one tile at a time (terminal version).
+        The world acts after every tile; walking stops as
+        soon as an encounter starts.
         """
 
         for next_pos in path[1:]:
 
-            x, y = self.pos
-
-            dx = next_pos[0] - x
-            dy = next_pos[1] - y
-
-            direction = {
-                (0, 1): "up",
-                (0, -1): "down",
-                (-1, 0): "left",
-                (1, 0): "right"
-            }[(dx, dy)]
-
-
-            if not self.move(direction):
-
-                print("⛔ Route blocked, stopping.")
-
+            if not self.step_to(next_pos):
+                print("Route blocked, stopping.")
                 return
-
 
             self.model.step()
 
-
             if self.encounter:
-
-                print("⚠️ Travel interrupted!")
-
+                print("Travel interrupted!")
                 return
 
-
-        print(f"📍 Arrived at {self.pos}")
-
+        print(f"Arrived at {self.pos}.")
 
     # ===================================================
-    # CHECK FOR ENCOUNTER
+    # ENCOUNTERS
     # ===================================================
 
     def check_for_encounter(self):
 
-        nearby_cells = self.model.grid.get_neighborhood(
-            self.pos,
-            moore=True,
-            include_center=False,
-            radius=1
+        cells = self.model.grid.get_neighborhood(
+            self.pos, moore=True, include_center=True, radius=1
         )
 
+        for cell in cells:
 
-        for cell in nearby_cells:
+            for obj in self.model.grid.get_cell_list_contents([cell]):
 
-            contents = self.model.grid.get_cell_list_contents(
-                [cell]
-            )
-
-
-            for obj in contents:
-
-                if isinstance(
-                    obj,
-                    CreatureAgent
+                if (
+                    isinstance(obj, CreatureAgent)
+                    and not obj.player_owned
+                    and obj.hp > 0
+                    and obj.calm == 0
                 ):
-
-                    if (
-                        not obj.player_owned
-                        and
-                        obj.hp > 0
-                    ):
-
-                        return obj
-
+                    return obj
 
         return None
-
-
-    # ===================================================
-    # START ENCOUNTER
-    # ===================================================
 
     def start_encounter(self, creature):
 
         if self.encounter is not None:
-
             return
-
 
         self.encounter = creature
 
-
-        print(
-            "\n⚡ WILD ENCOUNTER!"
-        )
-
-
-        print(
-            f"A wild {creature.species} "
-            f"appeared!"
-        )
-
-
-        print(
-            f"❤️ Wild {creature.species}: "
-            f"{creature.hp}/"
-            f"{creature.max_hp} HP"
-        )
-
-
-        print(
-            f"⚡ Your "
-            f"{self.active_creature.species}: "
-            f"{self.active_creature.hp}/"
-            f"{self.active_creature.max_hp} HP"
-        )
-
+        print(f"A wild {creature.species} appeared!")
 
     # ===================================================
-    # PLAYER'S CREATURE ATTACKS
+    # BATTLE
     # ===================================================
 
     def attack(self):
 
         if self.encounter is None:
-
             return False
-
-
-        if self.active_creature.hp <= 0:
-
-            print(
-                f"❌ {self.active_creature.species} "
-                f"is fainted!"
-            )
-
-            return False
-
 
         wild = self.encounter
-
         attacker = self.active_creature
 
+        damage = self.model.random.randint(*PLAYER_DAMAGE)
 
-        damage = random.randint(
-            attacker.attack // 2,
-            attacker.attack
-        )
-
-
-        wild.take_damage(
-            damage
-        )
-
-
-        attacker.gain_xp(10)
-
+        wild.take_damage(damage)
 
         print(
-            f"⚔️ {attacker.species} attacked "
-            f"{wild.species} "
-            f"for {damage} damage!"
+            f"{attacker.species} hit {wild.species} for {damage}. "
+            f"({wild.hp}/{wild.max_hp} HP left)"
         )
-
-
-        print(
-            f"❤️ Wild {wild.species}: "
-            f"{wild.hp}/"
-            f"{wild.max_hp} HP"
-        )
-
-
-        # -----------------------------------------------
-        # WILD CREATURE DEFEATED
-        # -----------------------------------------------
 
         if wild.hp <= 0:
 
-            print(
-                f"💀 Wild {wild.species} "
-                f"fainted!"
-            )
-
-
-            attacker.gain_xp(20)
-
+            print(f"Wild {wild.species} fainted!")
 
             wild.remove()
 
-
+            self.defeated += 1
             self.encounter = None
-
 
             return True
 
-
-        # -----------------------------------------------
-        # WILD CREATURE RETALIATES
-        # -----------------------------------------------
-
         self.wild_attack()
 
-
         return True
-
-
-    # ===================================================
-    # WILD CREATURE ATTACK
-    # ===================================================
 
     def wild_attack(self):
 
         if self.encounter is None:
-
             return
 
-
         wild = self.encounter
-
         defender = self.active_creature
 
+        damage = self.model.random.randint(*WILD_DAMAGE)
 
-        damage = random.randint(
-            5,
-            15
-        )
-
-
-        defender.take_damage(
-            damage
-        )
-
+        defender.take_damage(damage)
 
         print(
-            f"🐾 Wild {wild.species} attacked "
-            f"{defender.species} "
-            f"for {damage} damage!"
+            f"Wild {wild.species} hit {defender.species} for {damage}. "
+            f"({defender.hp}/{defender.max_hp} HP left)"
         )
-
-
-        print(
-            f"❤️ {defender.species}: "
-            f"{defender.hp}/"
-            f"{defender.max_hp} HP"
-        )
-
-
-        # -----------------------------------------------
-        # PLAYER CREATURE FAINTS
-        # -----------------------------------------------
 
         if defender.hp <= 0:
-
-            print(
-                f"💫 {defender.species} "
-                f"fainted!"
-            )
-
-
             self.handle_faint()
-
-
-    # ===================================================
-    # CAPTURE
-    # ===================================================
 
     def attempt_capture(self):
 
         if self.encounter is None:
-
             return False
-
 
         creature = self.encounter
 
+        # full HP -> 25%,  almost 0 HP -> 90%
+        ratio = creature.hp / creature.max_hp
+        chance = 0.25 + 0.65 * (1 - ratio)
 
-        # -----------------------------------------------
-        # CAPTURE CHANCE
-        # -----------------------------------------------
+        print(f"Capture chance: {chance * 100:.0f}%")
 
-        hp_ratio = (
-            creature.hp
-            /
-            creature.max_hp
-        )
+        if self.model.random.random() < chance:
 
+            print(f"{creature.species} was captured!")
 
-        # Full HP  -> 20%
-        # 75 HP    -> 37.5%
-        # 50 HP    -> 55%
-        # 25 HP    -> 72.5%
-        # 0 HP     -> 90%
-
-        capture_chance = (
-            0.20
-            +
-            (1 - hp_ratio)
-            * 0.70
-        )
-
-
-        print(
-            f"🎯 Capture chance: "
-            f"{capture_chance * 100:.1f}%"
-        )
-
-
-        roll = random.random()
-
-
-        # -----------------------------------------------
-        # CAPTURE SUCCESS
-        # -----------------------------------------------
-
-        if roll < capture_chance:
-
-            print(
-                f"🎉 {creature.species} "
-                f"was captured!"
-            )
-
-
-            # Mark as player-owned
             creature.player_owned = True
+            creature.heal()
+            creature.remove()          # leaves the map, joins the team
 
-
-            # Add to team
-            self.team.append(
-                creature
-            )
-
-
-            self.captured_creatures.append(
-                creature.species
-            )
-
-
-            # Restore energy
-            creature.energy = MAX_ENERGY
-
-
-            # Remove from wild world
-            creature.remove()
-
+            self.team.append(creature)
+            self.captured_creatures.append(creature.species)
 
             self.encounter = None
 
-
-            print(
-                f"📦 Team: "
-                f"{self.team_names()}"
-            )
-
-
             return True
 
+        print(f"{creature.species} broke free!")
 
-        # -----------------------------------------------
-        # CAPTURE FAILURE
-        # -----------------------------------------------
-
-        else:
-
-            print(
-                f"❌ {creature.species} "
-                f"escaped the capture!"
-            )
-
-
-            # Failed capture uses the player's turn
-            self.wild_attack()
-
-
-            return False
-
-
-    # ===================================================
-    # SWITCH ACTIVE CREATURE
-    # ===================================================
-
-    def choose_active_creature(self, index):
-
-        if (
-            index < 0
-            or
-            index >= len(self.team)
-        ):
-
-            print(
-                "❌ Invalid team choice!"
-            )
-
-            return False
-
-
-        creature = self.team[index]
-
-
-        if creature.hp <= 0:
-
-            print(
-                f"❌ {creature.species} "
-                f"is fainted!"
-            )
-
-            return False
-
-
-        self.active_creature = creature
-
-
-        print(
-            f"🔄 Go, "
-            f"{creature.species}!"
-        )
-
-
-        return True
-
-
-    # ===================================================
-    # HANDLE FAINT
-    # ===================================================
-
-    def handle_faint(self):
-
-        available = []
-
-
-        for creature in self.team:
-
-            if creature.hp > 0:
-
-                available.append(
-                    creature
-                )
-
-
-        # -----------------------------------------------
-        # ANOTHER CREATURE AVAILABLE
-        # -----------------------------------------------
-
-        if available:
-
-            print(
-                "\n⚠️ Your active creature "
-                "has fainted."
-            )
-
-
-            print(
-                "Choose another creature "
-                "from your team."
-            )
-
-
-            return True
-
-
-        # -----------------------------------------------
-        # EVERY CREATURE FAINTED
-        # -----------------------------------------------
-
-        print(
-            "\n💔 All your creatures "
-            "have fainted!"
-        )
-
-
-        print(
-            "🏕️ You retreat to "
-            "the healing point."
-        )
-
-
-        self.encounter = None
-
-
-        # For the prototype, automatically
-        # heal the team so the player does
-        # not get permanently stuck.
-        self.heal_team()
-
+        self.wild_attack()
 
         return False
 
-
-    # ===================================================
-    # HEAL TEAM
-    # ===================================================
-
-    def heal_team(self):
-
-        print(
-            "\n🏥 Your team is being healed..."
-        )
-
-
-        for creature in self.team:
-
-            creature.heal()
-
-
-        # Starter becomes active again
-        self.active_creature = self.starter
-
-
-        print(
-            f"⚡ "
-            f"{self.active_creature.species} "
-            f"is ready to battle again!"
-        )
-
-
-    # ===================================================
-    # RUN AWAY
-    # ===================================================
-
     def run_away(self):
 
-        if self.encounter:
+        if self.encounter is None:
+            return False
 
-            print(
-                f"🏃 Escaped from "
-                f"{self.encounter.species}!"
-            )
+        print(f"You escaped from {self.encounter.species}.")
 
+        # it loses interest for a few turns, otherwise the
+        # next move would start the same fight again
+        self.encounter.calm = CALM_TURNS
+        self.encounter = None
+
+        return True
+
+    # ===================================================
+    # TEAM
+    # ===================================================
+
+    def alive_team(self):
+        return [c for c in self.team if c.hp > 0]
+
+    def choose_active_creature(self, index):
+
+        if not 0 <= index < len(self.team):
+            print("Invalid team choice!")
+            return False
+
+        creature = self.team[index]
+
+        if creature.hp <= 0:
+            print(f"{creature.species} has fainted!")
+            return False
+
+        self.active_creature = creature
+
+        print(f"Go, {creature.species}!")
+
+        return True
+
+    def next_creature(self):
+        """Switch to the next healthy team member."""
+
+        n = len(self.team)
+        start = self.team.index(self.active_creature)
+
+        for i in range(1, n):
+
+            candidate = self.team[(start + i) % n]
+
+            if candidate.hp > 0:
+                self.active_creature = candidate
+                print(f"Go, {candidate.species}!")
+                return True
+
+        print("No other healthy creature.")
+        return False
+
+    def handle_faint(self):
+        """
+        The active creature fainted.
+        - another one is healthy -> it is sent out automatically
+        - nobody is left        -> back to camp, team healed
+        """
+
+        fainted = self.active_creature
+
+        print(f"{fainted.species} fainted!")
+
+        alive = self.alive_team()
+
+        if alive:
+
+            self.active_creature = alive[0]
+
+            print(f"Go, {self.active_creature.species}!")
+
+            return True
+
+        print("All your creatures fainted! Back to camp.")
+
+        if self.encounter is not None:
+            self.encounter.calm = CALM_TURNS
 
         self.encounter = None
 
+        self.model.grid.move_agent(self, self.model.start_pos)
 
-    # ===================================================
-    # TEAM DISPLAY
-    # ===================================================
+        self.heal_team()
+
+        return False
+
+    def heal_team(self):
+
+        for creature in self.team:
+            creature.heal()
+
+        self.active_creature = self.starter
+
+        print("Your team was healed.")
+
+    # ---------------------------------------------------
 
     def team_names(self):
 
-        names = []
-
-
-        for creature in self.team:
-
-            names.append(
-                f"{creature.species} "
-                f"({creature.hp}/"
-                f"{creature.max_hp} HP)"
-            )
-
-
-        return names
+        return [
+            f"{c.species} ({c.hp}/{c.max_hp} HP)"
+            for c in self.team
+        ]
