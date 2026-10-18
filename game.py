@@ -113,6 +113,77 @@ def tile_center(pos):
 
 
 # =======================================================
+# SMALL UI HELPERS  (key badges, cards - used by the control
+# panel and the rules screen so both look consistent)
+# =======================================================
+
+ACCENT = "#2a5bd7"
+PANEL_BG = "#fbfaf6"
+CARD_BG = "#eef1f6"
+INK = "#2a2a2a"
+MUTED = "#6b6b6b"
+
+
+def card(ax, x, y, w, h, color=CARD_BG, accent=None, zorder=0.5):
+    """A rounded panel background, optionally with a coloured
+    accent bar down the left edge."""
+
+    ax.add_patch(FancyBboxPatch(
+        (x, y), w, h, boxstyle="round,pad=0,rounding_size=1.6",
+        facecolor=color, edgecolor="none", zorder=zorder))
+
+    if accent:
+
+        ax.add_patch(FancyBboxPatch(
+            (x, y), 1.3, h, boxstyle="round,pad=0,rounding_size=0.65",
+            facecolor=accent, edgecolor="none", zorder=zorder + 0.1))
+
+
+def pill(ax, x, y, text, color=ACCENT, text_color="white", size=8.5):
+    """A small rounded label, e.g. 'Turn 4'."""
+
+    w = max(10.0, 2.4 + 1.55 * len(text))
+
+    ax.add_patch(FancyBboxPatch(
+        (x, y), w, 3.6, boxstyle="round,pad=0,rounding_size=1.8",
+        facecolor=color, edgecolor="none", zorder=5))
+
+    ax.text(x + w / 2, y + 1.8, text, ha="center", va="center",
+            fontsize=size, color=text_color, fontweight="bold", zorder=5.2)
+
+    return w
+
+
+def key_badge(ax, x, y, label, color=ACCENT, size=8.0):
+    """A small rounded 'keycap', e.g. [W] or [Space]."""
+
+    w = max(4.2, 1.7 + 1.35 * len(label))
+
+    ax.add_patch(FancyBboxPatch(
+        (x, y), w, 3.3, boxstyle="round,pad=0,rounding_size=0.8",
+        facecolor="white", edgecolor=color, linewidth=1.3, zorder=5))
+
+    ax.text(x + w / 2, y + 1.65, label, ha="center", va="center",
+            fontsize=size, color=color, fontweight="bold",
+            family="monospace", zorder=5.2)
+
+    return w
+
+
+def key_row(ax, x, y, keys, text, color=ACCENT, size=8.5, gap=1.2):
+    """One or more key badges followed by a description, e.g.
+    [1] Attack."""
+
+    cx = x
+
+    for k in keys:
+        cx += key_badge(ax, cx, y - 0.3, k, color=color) + gap
+
+    ax.text(cx + 0.6, y + 1.35, text, fontsize=size, va="center",
+            color=INK, zorder=5.2)
+
+
+# =======================================================
 # SPRITES
 # =======================================================
 
@@ -574,6 +645,9 @@ class Game:
         self.bg = None            # cached picture of everything static
         self.need_full = True
 
+        self.phase = "intro"      # "intro" -> "playing", or "help" mid-game
+        self.ax_overlay = None
+
         # automatic A* walk (one tile per tick)
         self.timer = self.fig.canvas.new_timer(interval=WALK_MS)
         self.timer.add_callback(self.walk_tick)
@@ -584,6 +658,7 @@ class Game:
         self.last_t = time.perf_counter()
 
         self.new_game()
+        self.show_overlay("intro")
 
         self.anim_timer.start()
 
@@ -642,6 +717,128 @@ class Game:
     @property
     def walking(self):
         return bool(self.walk)
+
+    # ===================================================
+    # RULES / HELP OVERLAY
+    #
+    # Shown once before the first game (so new players know
+    # the controls before they touch anything) and again any
+    # time the player presses H.  It is a plain one-off draw
+    # on its own full-figure axes, separate from the normal
+    # blit loop, so it never interferes with the game scene
+    # underneath - dismissing it just removes this axes and
+    # lets the cached scene show through again.
+    # ===================================================
+
+    def show_overlay(self, mode):
+
+        self.phase = mode
+        self.stop_walk()
+
+        if self.ax_overlay is not None:
+            self.ax_overlay.remove()
+
+        ax = self.fig.add_axes([0, 0, 1, 1], zorder=50)
+        self.ax_overlay = ax
+
+        ax.set_xlim(0, 100)
+        ax.set_ylim(100, 0)
+        ax.axis("off")
+
+        ax.add_patch(Rectangle((0, 0), 100, 100, facecolor="black",
+                               alpha=0.55, edgecolor="none", zorder=0))
+
+        card(ax, 14, 6, 72, 88, color=PANEL_BG, zorder=1)
+
+        first_time = mode == "intro"
+
+        title = "WELCOME TO WILDBOUND" if first_time else "RULES & CONTROLS"
+        sub = ("Catch or defeat every wild creature to win."
+              if first_time else
+              "A quick reminder - press any key or click to resume.")
+
+        ax.text(50, 12, title, ha="center", fontsize=19, fontweight="bold",
+               color=INK, zorder=2)
+        ax.text(50, 17.5, sub, ha="center", fontsize=9.5, color=MUTED,
+               zorder=2)
+
+        y = [22.5]
+
+        def section(label, accent):
+
+            ax.add_patch(Rectangle((19, y[0] + 0.1), 1.4, 3.2,
+                                   facecolor=accent, edgecolor="none",
+                                   zorder=2))
+            ax.text(21.6, y[0] + 2.7, label, fontsize=10.5,
+                   fontweight="bold", color=accent, zorder=2)
+            y[0] += 6.0
+
+        def line(text, size=8.8, dy=3.6, color=INK):
+            ax.text(21, y[0], text, fontsize=size, color=color, zorder=2)
+            y[0] += dy
+
+        def keys(items, dy=3.6):
+
+            x = 21
+
+            for k, desc in items:
+                x += key_badge(ax, x, y[0] - 2.2, k) + 1.4
+                ax.text(x, y[0] - 0.6, desc, fontsize=8.6, va="center",
+                       color=INK, zorder=2)
+                x += 2.6 + 1.55 * len(desc)
+
+            y[0] += dy
+
+        section("GOAL", "#b8860b")
+        line("Explore the map, and capture or defeat every wild creature.")
+        y[0] += 0.8
+
+        section("MOVE & EXPLORE", ACCENT)
+        keys([("W A S D", "or arrow keys - move one tile")])
+        keys([("click", "a tile to plan an A* route")])
+        keys([("Enter", "or click again - walk the route")])
+        line("Tall grass is slow - A* always finds the cheapest path.",
+            size=8.1, color=MUTED, dy=3.2)
+        keys([("Space", "wait a turn"), ("Esc", "cancel route")])
+        y[0] += 0.8
+
+        section("BATTLE", "#b00000")
+        line("Walk next to a wild creature to start a fight.")
+        keys([("1", "Attack"), ("2", "Capture"), ("3", "Run")])
+        keys([("4", "or Tab - switch creature")])
+        line("Capture is more likely the lower its HP is.",
+            size=8.1, color=MUTED, dy=3.2)
+        y[0] += 0.8
+
+        section("ANYTIME", "#2e9e3e")
+        keys([("R", "restart"), ("H", "rules"), ("M", "mute")])
+
+        go = "Press any key or click to begin" if first_time \
+            else "Press any key or click to resume"
+
+        ax.text(50, 91, go, ha="center", fontsize=10.5, fontweight="bold",
+               color="white", zorder=2,
+               bbox=dict(boxstyle="round,pad=0.6", facecolor=ACCENT,
+                         edgecolor="none"))
+
+        self.fig.canvas.draw()
+
+    def hide_overlay(self):
+
+        if self.ax_overlay is not None:
+            self.ax_overlay.remove()
+            self.ax_overlay = None
+
+        self.phase = "playing"
+        self.need_full = True
+
+        self.fig.canvas.draw()
+
+    def start_game(self):
+        self.hide_overlay()
+
+    def close_help(self):
+        self.hide_overlay()
 
     # ===================================================
     # RUNNING A GAME ACTION  (+ animating what changed)
@@ -988,8 +1185,20 @@ class Game:
 
         key = (event.key or "").lower()
 
+        if self.phase == "intro":
+            self.start_game()
+            return
+
+        if self.phase == "help":
+            self.close_help()
+            return
+
         if key == "r":
             self.new_game()
+            return
+
+        if key == "h":
+            self.show_overlay("help")
             return
 
         if self.walking:
@@ -1041,6 +1250,14 @@ class Game:
         self.draw()
 
     def on_click(self, event):
+
+        if self.phase == "intro":
+            self.start_game()
+            return
+
+        if self.phase == "help":
+            self.close_help()
+            return
 
         if event.inaxes is not self.ax_map or event.xdata is None:
             return
@@ -1288,6 +1505,9 @@ class Game:
 
     def render(self):
 
+        if self.phase != "playing":
+            return          # the rules overlay is showing; leave it alone
+
         canvas = self.fig.canvas
 
         if not BLIT:
@@ -1475,112 +1695,162 @@ class Game:
         ax.set_xlim(0, 100)
         ax.set_ylim(100, 0)
         ax.axis("off")
+        ax.add_patch(Rectangle((0, 0), 100, 100, facecolor=PANEL_BG,
+                               edgecolor="none", zorder=0))
 
         self.hp_widgets = []
 
-        y = [2.0]       # current line (a list so helpers can change it)
+        wild = m.wild_creatures()
 
-        def text(s, x=0, size=9, **kw):
+        # ---- header: title + live stats pills ----
+        ax.text(0, 2.2, "WILDBOUND", fontsize=18, fontweight="bold",
+               color=INK, zorder=2)
+        ax.text(100, 2.2, "[H] rules", ha="right", fontsize=8,
+               color=MUTED, zorder=2)
 
-            return ax.text(x, y[0], s, fontsize=size, va="top",
-                           family="monospace", **kw)
+        px = 0.0
+
+        for label, color in (
+            (f"Turn {m.step_count}", "#555555"),
+            (f"Wild left {len(wild)}", "#b00000" if wild else "#2e9e3e"),
+            (f"Caught {len(p.captured_creatures)}", "#b8860b"),
+        ):
+            px += pill(ax, px, 8.6, label, color=color) + 1.6
+
+        y = [15.5]       # current line (a list so helpers can change it)
+
+        def text(s, x=3, size=9, **kw):
+
+            return ax.text(x, y[0], s, fontsize=size, va="top", **kw)
 
         def skip(n):
             y[0] += n
 
-        def heading(s):
+        def section_start(height, accent):
 
-            skip(1)
-            text(s, size=9.5, fontweight="bold", color="#444444")
-            skip(4.2)
+            top = y[0] - 1.6
+            card(ax, 0, top, 100, height, accent=accent)
+            y[0] += 1.8
+
+            return top
+
+        def heading(s, color=INK):
+
+            text(s, size=9.5, fontweight="bold", color=color, x=4.4)
+            skip(4.3)
 
         def hp_row(creature, color):
 
             disp = self.disp_hp.setdefault(creature, creature.hp)
+            frac = max(0.0, disp) / creature.max_hp
 
-            ax.add_patch(Rectangle(
-                (30, y[0] + 0.3), 42, 2.2,
+            bx, bw, bh = 34, 40, 2.4
+
+            ax.add_patch(FancyBboxPatch(
+                (bx, y[0] + 0.3), bw, bh,
+                boxstyle="round,pad=0,rounding_size=1.2",
                 facecolor="#dddddd", edgecolor="none"))
 
-            fg = Rectangle(
-                (30, y[0] + 0.3), 42 * max(0.0, disp) / creature.max_hp, 2.2,
+            fg = FancyBboxPatch(
+                (bx, y[0] + 0.3), max(0.6, bw * frac), bh,
+                boxstyle="round,pad=0,rounding_size=1.2",
                 facecolor=color if creature.hp > 0 else "#888888",
                 edgecolor="none")
 
             ax.add_patch(fg)
 
-            txt = text(f"{round(disp):>3}/{creature.max_hp}", x=75)
+            txt = text(f"{round(disp):>3}/{creature.max_hp}", x=77,
+                      family="monospace")
 
             flag_moving(fg, txt)
 
-            self.hp_widgets.append((creature, fg, 42, txt))
+            self.hp_widgets.append((creature, fg, bw, txt))
 
-        # title + status
-        text("WILDBOUND", size=18, fontweight="bold")
-        skip(8)
+        # ---- team card ----
+        team_h = 4.0 + 7.6 * len(p.team) + 1.0
+        section_start(team_h, ACCENT)
 
-        wild = m.wild_creatures()
-
-        text(f"Turn {m.step_count}   Wild left: {len(wild)}   "
-             f"Caught: {len(p.captured_creatures)}")
-        skip(4.2)
-
-        # team
-        heading("YOUR TEAM   (4 / Tab = switch)")
+        header_y = y[0]
+        heading("YOUR TEAM")
+        ax.text(96, header_y, "[4]/[Tab] switch", ha="right", fontsize=7.6,
+               color=MUTED, va="top", zorder=2)
+        skip(0.3)
 
         for c in p.team:
 
-            mark = ">" if c is p.active_creature else " "
+            active = c is p.active_creature
 
-            text(f"{mark} {c.species}", fontweight="bold"
-                 if c is p.active_creature else "normal")
+            text(("> " if active else "  ") + c.species,
+                fontweight="bold" if active else "normal",
+                color=ACCENT if active else INK)
 
             hp_row(c, "#2e9e3e")
 
-            skip(3.8)
+            skip(3.4)
 
-        # battle / controls
+        skip(2.0)
+
+        # ---- battle / controls card ----
         if p.encounter is not None:
 
             e = p.encounter
 
-            heading("BATTLE!")
+            bh = 18.5
+            section_start(bh, "#b00000")
+
+            heading("BATTLE!", color="#b00000")
 
             text(f"Wild {e.species}", fontweight="bold", color="#b00000")
 
             hp_row(e, "#d03030")
 
-            skip(4.5)
+            skip(4.2)
 
-            text("[1] Attack  [2] Capture  [3] Run")
+            key_row(ax, 4, y[0], ["1"], "Attack", color="#b00000")
+            skip(4.2)
+            key_row(ax, 4, y[0], ["2"], "Capture", color="#b00000")
+            skip(4.2)
+            key_row(ax, 4, y[0], ["3"], "Run", color="#b00000")
+            skip(4.6)
 
-            skip(3.8)
-
-            text("Capture is likelier at low HP.", size=8, color="#666666")
-
+            text("Capture is likelier at low HP.", size=7.8, color=MUTED)
             skip(3.8)
 
         elif m.is_won():
 
-            heading("YOU WIN!")
-            text("Press R for a new game.")
-            skip(3.8)
+            section_start(14.0, "#2e9e3e")
+
+            heading("YOU WIN!", color="#2e9e3e")
+            text(f"Caught {len(p.captured_creatures)}, "
+                f"defeated {p.defeated}.", size=8.5)
+            skip(4.0)
+            key_row(ax, 4, y[0], ["R"], "play again")
+            skip(4.5)
 
         else:
 
+            section_start(22.0, ACCENT)
+
             heading("CONTROLS")
 
-            text("Arrows / WASD  move one tile")
-            skip(3.4)
-            text("Click a tile    plan A* route")
-            skip(3.4)
-            text("Enter / click   follow the route")
-            skip(3.4)
-            text("Space wait   Esc cancel   R restart")
-            skip(3.8)
+            key_row(ax, 4, y[0], ["W", "A", "S", "D"], "move")
+            skip(4.4)
+            key_row(ax, 4, y[0], ["click"], "plan A* route")
+            skip(4.4)
+            key_row(ax, 4, y[0], ["Enter"], "follow it")
+            skip(4.4)
+            key_row(ax, 4, y[0], ["Space"], "wait")
+            skip(4.4)
+            key_row(ax, 4, y[0], ["Esc"], "cancel route")
+            skip(4.6)
 
-        # AI status
-        heading("WILD CREATURES (AI)")
+        skip(2.0)
+
+        # ---- AI status card ----
+        ai_h = 4.0 + 3.6 * max(1, len(wild)) + 1.0
+        section_start(ai_h, "#ff8c00")
+
+        heading("WILD CREATURES (AI)", color="#b85c00")
 
         for c in wild:
 
@@ -1590,7 +1860,7 @@ class Game:
                 state = "fighting you"
             elif plan:
                 path, berry = plan
-                state = (f"A* to berry {berry.pos}, "
+                state = (f"-> berry {berry.pos}, "
                          f"cost {path_cost(path, m.move_cost)}")
             elif c.is_hungry:
                 state = "hungry, searching"
@@ -1599,27 +1869,39 @@ class Game:
             else:
                 state = "wandering"
 
-            text(f"{c.species[:9]:<9} E{c.energy:>3}  {state}", size=8)
+            text(f"{c.species:<9} E{c.energy:>3}  {state}", size=7.8,
+                family="monospace")
 
             skip(3.4)
 
         if not wild:
-            text("none left", size=8)
+            text("none left", size=8, color=MUTED)
             skip(3.4)
 
-        # log
-        heading("LOG")
+        skip(2.0)
 
+        # ---- log card: only as many lines as actually fit below
+        # everything else, so a big team + a long log can never spill
+        # past the bottom of the panel ----
         lines = []
 
-        for entry in self.log[-8:]:
-            lines.extend(textwrap.wrap(entry, 46) or [""])
+        for entry in self.log[-10:]:
+            lines.extend(textwrap.wrap(entry, 50) or [""])
 
-        for line in lines[-8:]:
+        room = 100 - (y[0] - 1.6) - 2.0 - 5.0
+        max_lines = max(1, int(room / 3.2))
 
-            text(line, size=8)
+        lines = lines[-min(7, max_lines):]
 
-            skip(3.3)
+        log_h = 4.0 + 3.2 * max(1, len(lines)) + 1.0
+        section_start(log_h, "#8a8a8a")
+
+        heading("LOG")
+
+        for line in lines:
+
+            text(line, size=7.8, color="#444444")
+            skip(3.2)
 
 
 # =======================================================
