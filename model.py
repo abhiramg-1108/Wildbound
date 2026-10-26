@@ -290,6 +290,5 @@ if __name__ == "__main__":
 
     for _ in range(30):
         model.step()
-
     print(f"\nWild left: {len(model.wild_creatures())}, "
           f"berries: {len(model.berries())}")
