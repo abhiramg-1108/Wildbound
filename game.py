@@ -811,7 +811,7 @@ class Game:
         y[0] += 0.8
 
         section("ANYTIME", "#2e9e3e")
-        keys([("R", "restart"), ("H", "rules"), ("M", "mute")])
+        keys([("R", "restart"), ("H", "show these rules again")])
 
         go = "Press any key or click to begin" if first_time \
             else "Press any key or click to resume"
@@ -1520,14 +1520,17 @@ class Game:
 
         canvas.restore_region(self.bg)
 
-        for ax in (self.ax_map, self.ax_info):
+        try:
+            canvas.restore_region(self.bg)
 
-            moving = [a for a in ax.get_children() if a.get_animated()]
+            for ax in (self.ax_map, self.ax_info):
+                moving = [a for a in ax.get_children() if a.get_animated()]
+                for artist in sorted(moving, key=lambda a: a.get_zorder()):
+                    ax.draw_artist(artist)
 
-            for artist in sorted(moving, key=lambda a: a.get_zorder()):
-                ax.draw_artist(artist)
-
-        canvas.blit(self.fig.bbox)
+            canvas.blit(self.fig.bbox)
+        except Exception:
+            pass
 
     # ===================================================
     # ANIMATION CLOCK
@@ -1767,7 +1770,11 @@ class Game:
             self.hp_widgets.append((creature, fg, bw, txt))
 
         # ---- team card ----
-        team_h = 4.0 + 7.6 * len(p.team) + 1.0
+        # (card height must match the real content flow below -
+        #  1.8 top pad + 4.3 heading + 0.3 hint-row + 3.4 per
+        #  creature + 2.2 bottom pad - or the card background
+        #  stops short of / overlaps the next card)
+        team_h = 8.6 + 3.4 * len(p.team)
         section_start(team_h, ACCENT)
 
         header_y = y[0]
@@ -1795,7 +1802,7 @@ class Game:
 
             e = p.encounter
 
-            bh = 18.5
+            bh = 29.5
             section_start(bh, "#b00000")
 
             heading("BATTLE!", color="#b00000")
@@ -1818,7 +1825,7 @@ class Game:
 
         elif m.is_won():
 
-            section_start(14.0, "#2e9e3e")
+            section_start(17.0, "#2e9e3e")
 
             heading("YOU WIN!", color="#2e9e3e")
             text(f"Caught {len(p.captured_creatures)}, "
@@ -1829,7 +1836,7 @@ class Game:
 
         else:
 
-            section_start(22.0, ACCENT)
+            section_start(30.5, ACCENT)
 
             heading("CONTROLS")
 
@@ -1847,7 +1854,7 @@ class Game:
         skip(2.0)
 
         # ---- AI status card ----
-        ai_h = 4.0 + 3.6 * max(1, len(wild)) + 1.0
+        ai_h = 8.3 + 3.4 * max(1, len(wild))
         section_start(ai_h, "#ff8c00")
 
         heading("WILD CREATURES (AI)", color="#b85c00")
@@ -1888,12 +1895,13 @@ class Game:
         for entry in self.log[-10:]:
             lines.extend(textwrap.wrap(entry, 50) or [""])
 
-        room = 100 - (y[0] - 1.6) - 2.0 - 5.0
+        overhead = 1.8 + 4.3 + 2.2       # top pad + heading + bottom pad
+        room = 100 - (y[0] - 1.6) - overhead
         max_lines = max(1, int(room / 3.2))
 
         lines = lines[-min(7, max_lines):]
 
-        log_h = 4.0 + 3.2 * max(1, len(lines)) + 1.0
+        log_h = overhead + 3.2 * max(1, len(lines))
         section_start(log_h, "#8a8a8a")
 
         heading("LOG")
